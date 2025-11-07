@@ -3,6 +3,9 @@
 
 import http from 'http';
 import { URL } from 'url';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const PORT = process.env.PORT || 3001;
 const API_PATH = '/api/groq-chat';

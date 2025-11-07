@@ -16,7 +16,8 @@
     "react-router-dom": "^6.26.2",
     "lucide-react": "0.522.0",
     "clsx": "latest",
-    "tailwind-merge": "latest"
+    "tailwind-merge": "latest",
+    "dotenv": "^16.4.5"
   },
   "devDependencies": {
     "@types/node": "^20.11.18",

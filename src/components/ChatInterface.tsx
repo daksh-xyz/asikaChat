@@ -2,6 +2,8 @@ import React, { useEffect, useState, useRef } from 'react';
 import { Send, Paperclip, Mic, Upload, Camera, ArrowLeft } from 'lucide-react';
 import { normalizeDOB } from '@/lib/date';
 import { groqCall } from '@/lib/assistant';
+import { savePatientData } from '@/lib/supabase';
+import { triggerPatientRegistrationWorkflow } from '@/lib/rpa';
 import { WelcomeScreen } from './WelcomeScreen';
 import { MessageBubble } from './MessageBubble';
 import { QuickActions } from './QuickActions';
@@ -350,20 +352,54 @@ export function ChatInterface() {
     // Do not auto-advance or change modes here; user must use the UI (e.g., Register button or upload document when prompted)
     return;
   };
-  const handleConfirmRegistration = () => {
+  const handleConfirmRegistration = async () => {
     setIsTyping(true);
-    setTimeout(() => {
-      const successMessage: Message = {
+    
+    try {
+      // Save patient data to Supabase
+      const result = await savePatientData(extractedInfo);
+      
+      if (result.success) {
+        // Trigger the RPA workflow asynchronously; do not block the user flow.
+        void triggerPatientRegistrationWorkflow({
+          patientId: result.patientId,
+          patientData: extractedInfo ?? undefined,
+        }).catch(error => {
+          console.error('Failed to trigger RPA workflow', error);
+        });
+
+        const successMessage: Message = {
+          id: Date.now().toString(),
+          text: `Perfect! Your registration has been completed successfully. Your patient ID is ${result.patientId}. You can now book appointments or ask me any health-related questions. How else can I help you today?`,
+          sender: 'agent',
+          timestamp: new Date(),
+          type: 'text'
+        };
+        setMessages(prev => [...prev, successMessage]);
+        setMode('chat');
+      } else {
+        const errorMessage: Message = {
+          id: Date.now().toString(),
+          text: `I'm sorry, there was an issue saving your registration: ${result.error}. Please try again or contact support.`,
+          sender: 'agent',
+          timestamp: new Date(),
+          type: 'text'
+        };
+        setMessages(prev => [...prev, errorMessage]);
+      }
+    } catch (error) {
+      const errorMessage: Message = {
         id: Date.now().toString(),
-        text: 'Perfect! Your registration has been completed successfully. Your patient ID is PT-2024-' + Math.floor(Math.random() * 10000) + '. You can now book appointments or ask me any health-related questions. How else can I help you today?',
+        text: 'An unexpected error occurred while saving your registration. Please try again.',
         sender: 'agent',
         timestamp: new Date(),
         type: 'text'
       };
-      setMessages(prev => [...prev, successMessage]);
-      setMode('chat');
+      setMessages(prev => [...prev, errorMessage]);
+      console.error('Error during registration:', error);
+    } finally {
       setIsTyping(false);
-    }, 1500);
+    }
   };
   const handleDocumentUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];

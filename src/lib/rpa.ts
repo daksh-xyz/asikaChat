@@ -1,4 +1,4 @@
-const DEFAULT_RPA_BASE_URL = 'http://localhost:5000';
+const DEFAULT_RPA_BASE_URL = 'http://43.205.239.45:5000';
 
 const RPA_BASE_URL = DEFAULT_RPA_BASE_URL;
 

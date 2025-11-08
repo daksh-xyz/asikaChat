@@ -1,7 +1,6 @@
 const DEFAULT_RPA_BASE_URL = 'http://localhost:5000';
 
-const RPA_BASE_URL =
-  import.meta.env?.VITE_RPA_BACKEND_URL?.toString().trim() || DEFAULT_RPA_BASE_URL;
+const RPA_BASE_URL = DEFAULT_RPA_BASE_URL;
 
 interface TriggerPayload {
   patientId?: string;

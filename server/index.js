@@ -2,7 +2,9 @@
 // Uses Node 18+ global fetch. Set GROQ_API_KEY in your environment.
 
 import http from 'http';
-import { URL } from 'url';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath, URL } from 'url';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -10,6 +12,25 @@ dotenv.config();
 const PORT = process.env.PORT || 3001;
 const API_PATH = '/api/groq-chat';
 const GROQ_ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const DIST_DIR = path.resolve(__dirname, '../dist');
+const DIST_INDEX = path.join(DIST_DIR, 'index.html');
+const MIME_TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.webp': 'image/webp',
+  '.txt': 'text/plain; charset=utf-8',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+};
 
 // Default system prompt used if client does not supply one.
 const DEFAULT_SYSTEM_PROMPT = `
@@ -150,9 +171,94 @@ const server = http.createServer(async (req, res) => {
     return handleGroqChat(req, res);
   }
 
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    const served = await tryServeStatic(req, res, url.pathname);
+    if (served) return;
+  }
+
   send(res, 404, { error: 'Not found' });
 });
 
 server.listen(PORT, () => {
   console.log(`[server] Listening on http://localhost:${PORT}${API_PATH}`);
 });
+
+async function tryServeStatic(req, res, pathname) {
+  if (!fs.existsSync(DIST_DIR)) {
+    return false;
+  }
+
+  const filePath = resolveDistPath(pathname);
+  if (!filePath) {
+    send(res, 403, { error: 'Forbidden' });
+    return true;
+  }
+
+  let fileInfo = await statFileOrIndex(filePath);
+  if (!fileInfo && acceptsHtml(req)) {
+    fileInfo = await statFileOrIndex(DIST_INDEX);
+  }
+
+  if (!fileInfo) {
+    return false;
+  }
+
+  serveFile(req, res, fileInfo);
+  return true;
+}
+
+function resolveDistPath(pathname) {
+  try {
+    const decoded = decodeURIComponent(pathname.split('?')[0]);
+    const relative = decoded === '/' ? './index.html' : `.${decoded}`;
+    const fullPath = path.resolve(DIST_DIR, relative);
+    if (!fullPath.startsWith(DIST_DIR)) {
+      return null;
+    }
+    return fullPath;
+  } catch {
+    return null;
+  }
+}
+
+async function statFileOrIndex(targetPath) {
+  if (!targetPath) return null;
+  try {
+    let stat = await fs.promises.stat(targetPath);
+    if (stat.isDirectory()) {
+      const indexPath = path.join(targetPath, 'index.html');
+      stat = await fs.promises.stat(indexPath);
+      return { path: indexPath, stat };
+    }
+    if (stat.isFile()) {
+      return { path: targetPath, stat };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function serveFile(req, res, fileInfo) {
+  const ext = path.extname(fileInfo.path).toLowerCase();
+  const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+  const headers = {
+    'Content-Type': contentType,
+    'Content-Length': fileInfo.stat.size,
+  };
+  if (ext && ext !== '.html') {
+    headers['Cache-Control'] = 'public, max-age=31536000, immutable';
+  }
+
+  res.writeHead(200, headers);
+  if (req.method === 'HEAD') {
+    res.end();
+    return;
+  }
+  fs.createReadStream(fileInfo.path).pipe(res);
+}
+
+function acceptsHtml(req) {
+  const accept = req.headers.accept || '';
+  return req.method === 'GET' && accept.includes('text/html');
+}

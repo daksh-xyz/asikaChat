@@ -21,3 +21,21 @@ This template includes a minimal proxy at `server/index.js` that forwards chat a
 Notes:
 - Do not put your Groq key in frontend code. Keep it in the server env.
 - For production, replace the placeholder vision model ID with a current one available in your Groq account.
+
+## Deploying to Render
+
+Deploy both the Vite frontend and the Node proxy behind a single Render Web Service:
+
+1. Commit your changes and push to GitHub (or any git remote Render can reach).
+2. Either click **New → Blueprint Instance** in Render and point it to this repo (Render will pick up `render.yaml`) or create a Web Service manually with these settings:
+   - **Environment:** Node
+   - **Build command:** `npm install && npm run build`
+   - **Start command:** `npm run start`
+   - **Node version env var:** `NODE_VERSION=20`
+3. Add your secrets as Render environment variables:
+   - `GROQ_API_KEY` (required)
+   - Optional: `ASSISTANT_SYSTEM_PROMPT` to override the default instructions.
+4. Deploy. Render runs the build, producing the Vite `dist/` assets. The Node server now:
+   - Serves everything in `dist/` (SPA routing is handled automatically)
+   - Responds to `/api/groq-chat` from the same origin, so the browser can call it without CORS tweaks.
+5. After the deploy finishes, visit the Render URL—both the UI and API live under that single domain.

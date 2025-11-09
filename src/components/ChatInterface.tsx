@@ -1,5 +1,8 @@
-import { Mic, Paperclip, Send } from 'lucide-react'
+import { Mic, Paperclip, Send, CheckCircle, Loader2, AlertCircle } from 'lucide-react'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { triggerPatientRegistrationWorkflow } from '../lib/rpa'
+import { Trash2 } from 'lucide-react'
+import { TypingIndicator } from './TypingIndicator'
 
 type Role = 'user' | 'assistant'
 
@@ -7,6 +10,15 @@ type ChatMessage = {
   id: string
   role: Role
   content: string
+}
+
+type RegistrationData = {
+  firstName: string
+  lastName: string
+  dateOfBirth: string
+  gender: string
+  country: string
+  phone?: string
 }
 
 const computeChatEndpoint = () => {
@@ -38,12 +50,16 @@ export function ChatInterface() {
       id: 'assistant-welcome',
       role: 'assistant',
       content:
-        "Hi, I'm Asika your fertility clinic assistant. Ask me anything about our services, treatments, or next steps and I'll help out!\nYou can speak to me in any language: English, తెలుగు, हिंदी, and more!",
+        `Good morning, I'm Maya, your personal FertilityPlus agent\nYou can speak to me in any language: English, తెలుగు, हिंदी, and more!`,
     },
   ])
   const [inputValue, setInputValue] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [pendingRegistration, setPendingRegistration] = useState<RegistrationData | null>(null)
+  const [awaitingPhone, setAwaitingPhone] = useState(false)
+  const [isTriggeringRegistration, setIsTriggeringRegistration] = useState(false)
+  const [registrationFeedback, setRegistrationFeedback] = useState<string | null>(null)
   const [attachment, setAttachment] = useState<AttachmentState | null>(null)
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
@@ -52,12 +68,99 @@ export function ChatInterface() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, isLoading])
 
+  useEffect(() => {
+    if (!pendingRegistration) {
+      setAwaitingPhone(false)
+    }
+  }, [pendingRegistration])
+
+  const handlePhoneCapture = (rawInput: string) => {
+    if (!pendingRegistration) {
+      return false
+    }
+    const digitsOnly = rawInput.replace(/\D/g, '')
+    if (digitsOnly.length < 7 || digitsOnly.length > 15) {
+      return false
+    }
+    const updated: RegistrationData = {
+      ...pendingRegistration,
+      phone: digitsOnly,
+    }
+    setPendingRegistration(updated)
+    setAwaitingPhone(false)
+    setRegistrationFeedback(null)
+    setError(null)
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: `assistant-phone-${Date.now()}`,
+        role: 'assistant',
+        content:
+          'Great, I captured your phone number. Please let me know if everything looks good or tap "Looks good" on the summary card.',
+      },
+    ])
+    return true
+  }
+
+  const handleRegistrationSave = (updated: RegistrationData) => {
+    const normalized: RegistrationData = {
+      ...updated,
+      firstName: formatNameCase(updated.firstName),
+      lastName: formatNameCase(updated.lastName),
+    }
+    setPendingRegistration(normalized)
+    setAwaitingPhone(!normalized.phone)
+    setRegistrationFeedback(
+      normalized.phone
+        ? 'Updated the registration details. Let me know if everything looks good.'
+        : 'Updated the details. Please share the patient phone number so I can complete the registration.',
+    )
+  }
+
+  const submitRegistrationToRpa = async (data: RegistrationData) => {
+    if (!data.phone) {
+      setRegistrationFeedback('Please share a valid phone number before we complete the registration.')
+      return
+    }
+
+    setIsTriggeringRegistration(true)
+    setRegistrationFeedback(null)
+    try {
+      const result = await triggerPatientRegistrationWorkflow({ patientData: data })
+      if (result.success) {
+        setPendingRegistration(null)
+        setAwaitingPhone(false)
+        setRegistrationFeedback('Success')
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `assistant-rpa-${Date.now()}`,
+            role: 'assistant',
+            content: 'Thanks for confirming. I have shared your registration details with our onboarding team.',
+          },
+        ])
+      } else {
+        setRegistrationFeedback('Failed. Please try again.')
+      }
+    } catch (err) {
+      setRegistrationFeedback('Failed. Please try again.')
+    } finally {
+      setIsTriggeringRegistration(false)
+    }
+  }
+
   const sendMessage = async (event?: React.FormEvent) => {
     event?.preventDefault()
     const trimmed = inputValue.trim()
     if ((!trimmed && !attachment) || isLoading) {
       return
     }
+
+    const normalizedInput = trimmed.toLowerCase()
+    const shouldConfirmRegistration =
+      Boolean(pendingRegistration) && !attachment && normalizedInput === 'yes'
+    const shouldRejectRegistration =
+      Boolean(pendingRegistration) && !attachment && normalizedInput === 'no'
 
     let messageContent = trimmed
     if (attachment) {
@@ -81,9 +184,29 @@ export function ChatInterface() {
     setIsLoading(true)
     setError(null)
 
+    if (shouldConfirmRegistration && pendingRegistration) {
+      if (awaitingPhone || !pendingRegistration.phone) {
+        setError('Please share the patient phone number before confirming.')
+      } else {
+        void submitRegistrationToRpa(pendingRegistration)
+      }
+    } else if (shouldRejectRegistration && pendingRegistration) {
+      setRegistrationFeedback('No problem. Use the Edit button or tell me what needs to change.')
+    }
+
     try {
       const body: Record<string, unknown> = {
         messages: nextMessages.map(({ role, content }) => ({ role, content })),
+      }
+
+      if (awaitingPhone && !attachment) {
+        const handled = handlePhoneCapture(trimmed)
+        setIsLoading(false)
+        setAttachment(null)
+        if (!handled) {
+          setError('Please enter a valid phone number containing 7-15 digits.')
+        }
+        return
       }
 
       if (attachment) {
@@ -111,10 +234,20 @@ export function ChatInterface() {
         throw new Error('The server response is missing the assistant reply.')
       }
 
+      let assistantReply = data.reply.trim()
+      const extracted = extractRegistrationDataFromContent(assistantReply)
+      if (extracted) {
+        setPendingRegistration(extracted)
+        setAwaitingPhone(true)
+        setRegistrationFeedback(null)
+        assistantReply =
+          'I extracted the details from your document. Please review them below and share the patient phone number so I can continue.'
+      }
+
       const assistantMessage: ChatMessage = {
         id: `assistant-${Date.now()}`,
         role: 'assistant',
-        content: data.reply.trim(),
+        content: assistantReply,
       }
 
       setMessages((prev) => [...prev, assistantMessage])
@@ -190,10 +323,22 @@ export function ChatInterface() {
         {renderedMessages}
         {isLoading && (
           <div className="flex justify-start">
-            <div className="rounded-2xl bg-white px-4 py-3 text-sm text-slate-500 shadow-sm ring-1 ring-slate-200">
-              Asika is typing…
-            </div>
+            <TypingIndicator />
           </div>
+        )}
+        {pendingRegistration && (
+          <RegistrationReviewCard
+            data={pendingRegistration}
+            awaitingPhone={awaitingPhone}
+            isSubmitting={isTriggeringRegistration}
+            feedback={registrationFeedback}
+            onConfirm={() => {
+              if (pendingRegistration) {
+                void submitRegistrationToRpa(pendingRegistration)
+              }
+            }}
+            onSave={handleRegistrationSave}
+          />
         )}
         <div ref={messagesEndRef} />
       </div>
@@ -212,23 +357,24 @@ export function ChatInterface() {
               accept="image/*"
               onChange={handleFileChange}
             />
-            <button
-              type="button"
-              onClick={handleAttachClick}
-              className="rounded-lg p-2 transition-colors hover:bg-blue-50"
-              aria-label="Attach file"
-            >
-              <Paperclip className="h-5 w-5 text-blue-600" />
-            </button>
-            {attachment && (
+            {!attachment ? (
               <button
                 type="button"
-                onClick={handleRemoveAttachment}
-                className="rounded-lg border border-red-100 px-3 py-1 text-xs font-medium text-red-600 transition-colors hover:bg-red-50"
+                onClick={handleAttachClick}
+                className="rounded-lg p-2 transition-colors hover:bg-blue-50"
+                aria-label="Attach file"
               >
-                Remove {attachment.name}
-              </button>
-            )}
+                <Paperclip className="h-5 w-5 text-[rgb(206,40,95)]" />
+              </button>) :
+              (
+                <button
+                  type="button"
+                  onClick={handleRemoveAttachment}
+                  className="rounded-lg border border-red-100 p-1 text-xs font-medium text-red-600 transition-colors hover:bg-red-50"
+                >
+                  <Trash2 />
+                </button>
+              )}
             <input
               value={inputValue}
               onChange={(event) => setInputValue(event.target.value)}
@@ -244,12 +390,12 @@ export function ChatInterface() {
               className="rounded-lg p-2 transition-colors hover:bg-teal-50"
               aria-label="Voice input"
             >
-              <Mic className="h-5 w-5 text-teal-600" />
+              <Mic className="h-5 w-5 text-[rgb(206,40,95)]" />
             </button>
             <button
               type="submit"
               disabled={(!inputValue.trim() && !attachment) || isLoading}
-              className="rounded-lg bg-gradient-to-r from-blue-500 to-teal-500 p-2 transition-colors hover:from-blue-600 hover:to-teal-600 disabled:from-gray-300 disabled:to-gray-300"
+              className="rounded-lg bg-[rgb(206,40,95)] p-2 transition-color disabled:from-gray-300 disabled:to-gray-300"
               aria-label="Send message"
             >
               <Send className="h-5 w-5 text-white" />
@@ -321,4 +467,237 @@ function renderFormattedContent(content: string) {
       </React.Fragment>
     )
   })
+}
+
+type RegistrationReviewCardProps = {
+  data: RegistrationData
+  awaitingPhone: boolean
+  isSubmitting: boolean
+  feedback: string | null
+  onConfirm: () => void
+  onSave: (updated: RegistrationData) => void
+}
+
+function RegistrationReviewCard({
+  data,
+  awaitingPhone,
+  isSubmitting,
+  feedback,
+  onConfirm,
+  onSave,
+}: RegistrationReviewCardProps) {
+  const [isEditing, setIsEditing] = useState(false)
+  const [editError, setEditError] = useState<string | null>(null)
+  const [draft, setDraft] = useState<RegistrationData>({ ...data })
+
+  useEffect(() => {
+    setDraft({ ...data })
+    setIsEditing(false)
+    setEditError(null)
+  }, [data])
+
+  const fieldConfigs: Array<{ key: keyof RegistrationData; label: string; placeholder?: string }> = [
+    { key: 'firstName', label: 'First Name', placeholder: 'Jane' },
+    { key: 'lastName', label: 'Last Name', placeholder: 'Doe' },
+    { key: 'dateOfBirth', label: 'Date of Birth', placeholder: '1996-04-15' },
+    { key: 'gender', label: 'Gender', placeholder: 'Female' },
+    { key: 'country', label: 'Country', placeholder: 'India' },
+    { key: 'phone', label: 'Phone', placeholder: '+91 98765 43210' },
+  ]
+
+  const handleDraftChange = (key: keyof RegistrationData, value: string) => {
+    setDraft((prev) => ({
+      ...prev,
+      [key]: value,
+    }))
+  }
+
+  const handleSave = () => {
+    const missingField = REQUIRED_REGISTRATION_KEYS.find((key) => !String(draft[key] || '').trim())
+    if (missingField) {
+      setEditError('Please fill out all required fields before saving.')
+      return
+    }
+    const phoneDigits = draft.phone ? draft.phone.replace(/\D/g, '') : ''
+    if (draft.phone && (phoneDigits.length < 7 || phoneDigits.length > 15)) {
+      setEditError('Phone numbers should contain 7-15 digits.')
+      return
+    }
+
+    setEditError(null)
+    onSave({
+      ...draft,
+      phone: phoneDigits ? phoneDigits : undefined,
+    })
+    setIsEditing(false)
+  }
+
+  const confirmDisabled = awaitingPhone || !data.phone || isSubmitting
+
+  return (
+    <div className="rounded-2xl bg-white p-4 text-sm shadow-sm ring-1 ring-blue-100">
+      <div className="mb-3 flex items-center gap-2 text-blue-700">
+        <CheckCircle className="h-4 w-4" />
+        <span className="font-semibold">Confirm extracted details</span>
+      </div>
+
+      {isEditing ? (
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          {fieldConfigs.map(({ key, label, placeholder }) => (
+            <label key={label} className="flex flex-col gap-1 text-xs font-medium text-slate-600">
+              {label}
+              <input
+                type={key === 'phone' ? 'tel' : 'text'}
+                value={(draft[key] as string) || ''}
+                placeholder={placeholder}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                onChange={(event) => handleDraftChange(key, event.target.value)}
+              />
+            </label>
+          ))}
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-3">
+          {fieldConfigs.map(({ label, key }) => (
+            <div key={label} className="rounded-xl bg-blue-50/60 px-3 py-2">
+              <p className="text-[10px] uppercase tracking-wide text-blue-500">{label}</p>
+              <p className="font-medium text-blue-900">{(data[key] as string) || '—'}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {awaitingPhone && !isEditing && (
+        <p className="mt-3 text-xs text-amber-600">
+          Please share the patient&apos;s phone number so I can finish the registration.
+        </p>
+      )}
+
+      {editError && (
+        <p className="mt-3 text-xs font-medium text-red-600">
+          {editError}
+        </p>
+      )}
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        {isEditing ? (
+          <>
+            <button
+              type="button"
+              onClick={() => {
+                setDraft({ ...data })
+                setIsEditing(false)
+                setEditError(null)
+              }}
+              className="flex-1 rounded-lg border border-slate-200 px-3 py-2 font-medium text-slate-600 transition hover:bg-slate-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleSave}
+              className="flex-1 rounded-lg bg-gradient-to-r from-blue-500 to-teal-500 px-3 py-2 font-semibold text-white transition"
+            >
+              Save changes
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setIsEditing(true)}
+            className="flex-1 rounded-lg border border-slate-200 px-3 py-2 font-medium text-slate-600 transition hover:bg-slate-50"
+          >
+            Edit details
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onConfirm}
+          disabled={confirmDisabled}
+          className="flex-1 rounded-lg bg-gradient-to-r from-blue-500 to-teal-500 px-3 py-2 font-semibold text-white transition disabled:opacity-60"
+        >
+          {isSubmitting ? (
+            <span className="flex items-center justify-center gap-2">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Submitting…
+            </span>
+          ) : confirmDisabled && awaitingPhone ? (
+            'Waiting for phone'
+          ) : (
+            'Looks good'
+          )}
+        </button>
+      </div>
+      {feedback && (
+        <div className="mt-3 flex items-start gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600">
+          <AlertCircle className="mt-0.5 h-4 w-4 text-amber-500" />
+          <span>{feedback}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+const REQUIRED_REGISTRATION_KEYS = ['firstName', 'lastName', 'dateOfBirth', 'gender', 'country'] as const
+
+function extractRegistrationDataFromContent(content: string): RegistrationData | null {
+  const candidates: string[] = []
+  const sanitized = stripCodeFence(content)
+  if (sanitized.startsWith('{') && sanitized.endsWith('}')) {
+    candidates.push(sanitized)
+  }
+
+  const objectMatch = content.match(/\{[\s\S]*\}/)
+  if (objectMatch) {
+    candidates.push(objectMatch[0])
+  }
+
+  for (const snippet of candidates) {
+    try {
+      const parsed = JSON.parse(snippet)
+      if (!isPlainObject(parsed)) {
+        continue
+      }
+      const missingField = REQUIRED_REGISTRATION_KEYS.find((key) => !(key in parsed))
+      if (missingField) {
+        continue
+      }
+      return {
+        firstName: formatNameCase(parsed.firstName),
+        lastName: formatNameCase(parsed.lastName),
+        dateOfBirth: toStringValue(parsed.dateOfBirth),
+        gender: toStringValue(parsed.gender),
+        country: toStringValue(parsed.country),
+        phone: undefined,
+      }
+    } catch {
+      continue
+    }
+  }
+
+  return null
+}
+
+function stripCodeFence(value: string) {
+  return value.trim().replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim()
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function toStringValue(value: unknown) {
+  if (value === null || value === undefined) {
+    return ''
+  }
+  return typeof value === 'string' ? value : String(value)
+}
+
+function formatNameCase(value: unknown) {
+  const text = toStringValue(value).trim()
+  if (!text) {
+    return ''
+  }
+  const lower = text.toLowerCase()
+  return lower.charAt(0).toUpperCase() + lower.slice(1)
 }

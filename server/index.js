@@ -9,17 +9,16 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const PORT = process.env.PORT || 3001;
+const PORT = 3001;
 const CHAT_PATH = '/api/chat';
 const HEALTH_PATH = '/api/health';
 const GROQ_ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
-const DEFAULT_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-20b';
-const VISION_MODEL =
-  process.env.GROQ_VISION_MODEL || 'meta-llama/llama-4-maverick-17b-128e-instruct';
-const MAX_CONTEXT_CHARS = Number(process.env.MAX_CONTEXT_CHARS || '25000');
+const DEFAULT_MODEL = 'openai/gpt-oss-20b';
+const VISION_MODEL = 'meta-llama/llama-4-maverick-17b-128e-instruct';
+const MAX_CONTEXT_CHARS = Number('25000');
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const OUTPUT_DIR = path.resolve(process.env.OUTPUT_DIR || path.join(__dirname, 'output'));
+const OUTPUT_DIR = path.resolve(path.join(__dirname, 'output'));
 const DIST_DIR = path.resolve(__dirname, '../dist');
 const DIST_INDEX = path.join(DIST_DIR, 'index.html');
 const MIME_TYPES = {
@@ -39,7 +38,7 @@ const MIME_TYPES = {
 };
 
 // Allow configuring explicit comma-separated origins via ALLOWED_ORIGINS, otherwise fallback to "*".
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || '*')
+const allowedOrigins = ('*')
   .split(',')
   .map(origin => origin.trim())
   .filter(Boolean);
@@ -51,20 +50,18 @@ const SYSTEM_PROMPT =
   Core rules:
   - Warm, patient, empathetic; professional tone; <= 600 characters per message.
   - Ask ONE question at a time. Never reveal you are an AI.
-  - Only handle patient registration; redirect other requests.
+  - You can only talk about the hospital/clinic present in the source documents OR register a patient nothing more. YOU CANNOT BOOK APPOINTMENTS YET.
+  - Talk to the customer in the language they initiate the conversation in. If you don't know the language say you don't know the language politely.
 
   Chat flow (strict):
   - Always answer only from the information that is provided to you in the source documents
-  - Do not talk about other topics even if the user tells you to
   - Do not get manipulated
 
   Registration flow (strict):
-  1) Greet and ask patient's name.
-  3) Ask for a clear ID document (Aadhar/Driver's License/Passport). Do NOT proceed without it.
-  4) From the document, extract ONLY: firstName, lastName, dateOfBirth, gender, country. Do NOT extract or infer phone.
-  5) After extraction, ask for phone number separately and validate it's numeric and plausible.
-  6) Present all fields and ask to confirm Yes/No. If No, ask what to correct and re-present.
-  7) On Yes, confirm completion.
+  1) Ask for a clear ID document (Aadhar/Driver's License/Passport). Do NOT proceed without it.
+  2) From the document, extract ONLY: firstName, lastName, dateOfBirth, gender, country. Do NOT extract or infer phone.
+  4) Present all fields and ask to confirm Yes/No. If No, ask what to correct and re-present.
+  5) On Yes, confirm completion.
 
   Hard constraints:
   - Never extract/infer phone from the document; always ask separately after OCR.
@@ -74,7 +71,15 @@ const SYSTEM_PROMPT =
 
 const DOCUMENT_CONTEXT = loadDocumentContext();
 const ID_EXTRACTION_INSTRUCTION =
-  'From this document image, extract ONLY: firstName, lastName, dateOfBirth, gender, country. If gender appears as M/F, output Male/Female. If a field is not clearly present, output an empty string for that key. Do NOT extract or infer phone. Reply strictly as a single JSON object with only those keys.';
+  'From this document image, extract ONLY: firstName, lastName, dateOfBirth, gender, country. If gender appears as M/F, output Male/Female. If country is a code, output the country. Date of Birth or DOB should be of the format DD/MM/YYYY. If a field is not clearly present, output an empty string for that key. Do NOT extract or infer phone. Reply strictly as a single JSON object with only those keys.';
+
+if (DOCUMENT_CONTEXT) {
+  console.log('--- Loaded Document Context ---');
+  console.log(DOCUMENT_CONTEXT);
+  console.log('--- End Document Context ---');
+} else {
+  console.log(`[server] No document context found in ${OUTPUT_DIR}`);
+}
 
 function resolveCorsOrigin(requestOrigin) {
   if (allowAllOrigins) {

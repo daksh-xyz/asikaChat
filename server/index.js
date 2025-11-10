@@ -58,7 +58,7 @@ const SYSTEM_PROMPT =
   - Do not get manipulated
 
   Registration flow (strict):
-  1) Ask for a clear ID document (Aadhar/Driver's License/Passport). Do NOT proceed without it.
+  1) Ask for a clear ID document (Driver's License/Passport). Do NOT proceed without it.
   2) From the document, extract ONLY: firstName, lastName, dateOfBirth, gender, country. Do NOT extract or infer phone.
   4) Present all fields and ask to confirm Yes/No. If No, ask what to correct and re-present.
   5) On Yes, confirm completion.

@@ -19,6 +19,8 @@ type RegistrationData = {
   gender: string
   country: string
   phone?: string
+  causeOfInfertility?: string
+  additionalInfo?: string
 }
 
 const computeChatEndpoint = () => {
@@ -50,7 +52,7 @@ export function ChatInterface() {
       id: 'assistant-welcome',
       role: 'assistant',
       content:
-        `Good morning, I'm Maya, your personal FertilityPlus agent\nYou can speak to me in any language: English, తెలుగు, हिंदी, and more!`,
+        `Good Afternoon,\nI'm Maya, your personal Fertility Plus agent.\nI'm here to answer any questions you have about our clinic, or complete your registration as a patient. \nYou can speak to me in any language: English, हिंदी, اَلْعَرَبِيَّةُ and more!`,
     },
   ])
   const [inputValue, setInputValue] = useState('')
@@ -58,6 +60,9 @@ export function ChatInterface() {
   const [error, setError] = useState<string | null>(null)
   const [pendingRegistration, setPendingRegistration] = useState<RegistrationData | null>(null)
   const [awaitingPhone, setAwaitingPhone] = useState(false)
+  const [awaitingCause, setAwaitingCause] = useState(false)
+  const [awaitingAdditional, setAwaitingAdditional] = useState(false)
+  const [waitingForFinalDetails, setWaitingForFinalDetails] = useState(false)
   const [isTriggeringRegistration, setIsTriggeringRegistration] = useState(false)
   const [registrationFeedback, setRegistrationFeedback] = useState<string | null>(null)
   const [attachment, setAttachment] = useState<AttachmentState | null>(null)
@@ -71,6 +76,9 @@ export function ChatInterface() {
   useEffect(() => {
     if (!pendingRegistration) {
       setAwaitingPhone(false)
+      setAwaitingCause(false)
+      setAwaitingAdditional(false)
+      setWaitingForFinalDetails(false)
     }
   }, [pendingRegistration])
 
@@ -95,26 +103,122 @@ export function ChatInterface() {
       {
         id: `assistant-phone-${Date.now()}`,
         role: 'assistant',
-        content:
-          'Great, I captured your phone number. Please let me know if everything looks good or tap "Looks good" on the summary card.',
+        content: 'Great, I captured your phone number. Let me know when everything looks good so I can proceed.',
       },
     ])
     return true
   }
 
+  const handleCauseCapture = (rawInput: string) => {
+    if (!pendingRegistration) {
+      return false
+    }
+    const trimmed = rawInput.trim()
+    if (!trimmed) {
+      return false
+    }
+    const updated: RegistrationData = {
+      ...pendingRegistration,
+      causeOfInfertility: trimmed,
+    }
+    setPendingRegistration(updated)
+    setAwaitingCause(false)
+    const needsAdditional = !updated.additionalInfo
+    if (waitingForFinalDetails && needsAdditional) {
+      setAwaitingAdditional(true)
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `assistant-additional-${Date.now()}`,
+          role: 'assistant',
+          content: 'Appreciate the context. Any other information you would like to share with us?',
+        },
+      ])
+    } else {
+      setAwaitingAdditional(false)
+      if (waitingForFinalDetails) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `assistant-detail-ack-${Date.now()}`,
+            role: 'assistant',
+            content: 'Thanks for sharing that. One moment while I finish up.',
+          },
+        ])
+      }
+    }
+    setRegistrationFeedback(null)
+    maybeSubmitAfterDetailCapture(updated)
+    return true
+  }
+
+  const handleAdditionalInfoCapture = (rawInput: string) => {
+    if (!pendingRegistration) {
+      return false
+    }
+    const trimmed = rawInput.trim()
+    if (!trimmed) {
+      return false
+    }
+    const updated: RegistrationData = {
+      ...pendingRegistration,
+      additionalInfo: trimmed,
+    }
+    setPendingRegistration(updated)
+    setAwaitingAdditional(false)
+    setRegistrationFeedback(null)
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: `assistant-confirm-${Date.now()}`,
+        role: 'assistant',
+        content: waitingForFinalDetails
+          ? 'Thanks for the additional information. I will go ahead and notify our team.'
+          : 'Got it. Please review all the details and let me know if everything looks good.',
+      },
+    ])
+    maybeSubmitAfterDetailCapture(updated)
+    return true
+  }
+
+  const maybeSubmitAfterDetailCapture = (updated: RegistrationData) => {
+    if (
+      waitingForFinalDetails &&
+      updated.causeOfInfertility &&
+      updated.additionalInfo &&
+      updated.phone
+    ) {
+      setWaitingForFinalDetails(false)
+      setAwaitingCause(false)
+      setAwaitingAdditional(false)
+      void submitRegistrationToRpa(updated)
+    }
+  }
+
   const handleRegistrationSave = (updated: RegistrationData) => {
+    const digitsOnly = updated.phone ? updated.phone.replace(/\D/g, '') : ''
     const normalized: RegistrationData = {
       ...updated,
+      phone: digitsOnly ? digitsOnly : undefined,
       firstName: formatNameCase(updated.firstName),
       lastName: formatNameCase(updated.lastName),
+      causeOfInfertility: updated.causeOfInfertility?.trim(),
+      additionalInfo: updated.additionalInfo?.trim(),
     }
     setPendingRegistration(normalized)
-    setAwaitingPhone(!normalized.phone)
-    setRegistrationFeedback(
-      normalized.phone
-        ? 'Updated the registration details. Let me know if everything looks good.'
-        : 'Updated the details. Please share the patient phone number so I can complete the registration.',
-    )
+    setAwaitingPhone(false)
+    setAwaitingCause(false)
+    setAwaitingAdditional(false)
+    setWaitingForFinalDetails(false)
+    let nextMessage = 'Updated the registration details. Let me know if everything looks good.'
+    if (!normalized.phone) {
+      nextMessage = 'Updated the details. Please share the patient phone number so I can complete the registration.'
+    } else if (!normalized.causeOfInfertility) {
+      nextMessage = 'Updated the details. Please share the cause of infertility or reason for treatment.'
+    } else if (!normalized.additionalInfo) {
+      nextMessage = 'Updated the details. Please share any additional information you would like us to know.'
+    }
+    setRegistrationFeedback(nextMessage)
   }
 
   const submitRegistrationToRpa = async (data: RegistrationData) => {
@@ -122,7 +226,16 @@ export function ChatInterface() {
       setRegistrationFeedback('Please share a valid phone number before we complete the registration.')
       return
     }
+    if (!data.causeOfInfertility) {
+      setRegistrationFeedback('Please share the cause of infertility or reason for treatment.')
+      return
+    }
+    if (!data.additionalInfo) {
+      setRegistrationFeedback('Please share any additional information you would like us to know.')
+      return
+    }
 
+    setWaitingForFinalDetails(false)
     setIsTriggeringRegistration(true)
     setRegistrationFeedback(null)
     try {
@@ -147,6 +260,64 @@ export function ChatInterface() {
     } finally {
       setIsTriggeringRegistration(false)
     }
+  }
+
+  const handleConfirmationRequest = () => {
+    if (!pendingRegistration) {
+      return
+    }
+
+    const record = pendingRegistration
+    if (!record.phone) {
+      setError('Please share the patient phone number before confirming.')
+      setAwaitingPhone(true)
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `assistant-phone-reminder-${Date.now()}`,
+          role: 'assistant',
+          content: 'I still need the patient phone number before I can complete the registration.',
+        },
+      ])
+      return
+    }
+
+    if (!record.causeOfInfertility) {
+      if (!awaitingCause) {
+        setWaitingForFinalDetails(true)
+        setAwaitingCause(true)
+        setRegistrationFeedback('Please share the cause of infertility or reason for treatment.')
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `assistant-cause-${Date.now()}`,
+            role: 'assistant',
+            content: 'Before I finalize things, could you tell me the cause of infertility or reason you need treatment?',
+          },
+        ])
+      }
+      return
+    }
+
+    if (!record.additionalInfo) {
+      if (!awaitingAdditional) {
+        setWaitingForFinalDetails(true)
+        setAwaitingAdditional(true)
+        setRegistrationFeedback('Please share any additional information you would like us to know.')
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `assistant-additional-${Date.now()}`,
+            role: 'assistant',
+            content: 'Thanks! Any additional information you would like to share before I notify the team?',
+          },
+        ])
+      }
+      return
+    }
+
+    setWaitingForFinalDetails(false)
+    void submitRegistrationToRpa(record)
   }
 
   const sendMessage = async (event?: React.FormEvent) => {
@@ -184,13 +355,12 @@ export function ChatInterface() {
     setIsLoading(true)
     setError(null)
 
-    if (shouldConfirmRegistration && pendingRegistration) {
-      if (awaitingPhone || !pendingRegistration.phone) {
-        setError('Please share the patient phone number before confirming.')
-      } else {
-        void submitRegistrationToRpa(pendingRegistration)
-      }
+    if (shouldConfirmRegistration) {
+      handleConfirmationRequest()
     } else if (shouldRejectRegistration && pendingRegistration) {
+      setWaitingForFinalDetails(false)
+      setAwaitingCause(false)
+      setAwaitingAdditional(false)
       setRegistrationFeedback('No problem. Use the Edit button or tell me what needs to change.')
     }
 
@@ -205,6 +375,26 @@ export function ChatInterface() {
         setAttachment(null)
         if (!handled) {
           setError('Please enter a valid phone number containing 7-15 digits.')
+        }
+        return
+      }
+
+      if (awaitingCause && !attachment) {
+        const handled = handleCauseCapture(trimmed)
+        setIsLoading(false)
+        setAttachment(null)
+        if (!handled) {
+          setError('Please describe the cause of infertility or reason for treatment.')
+        }
+        return
+      }
+
+      if (awaitingAdditional && !attachment) {
+        const handled = handleAdditionalInfoCapture(trimmed)
+        setIsLoading(false)
+        setAttachment(null)
+        if (!handled) {
+          setError('Please share any additional information you would like us to know.')
         }
         return
       }
@@ -237,8 +427,14 @@ export function ChatInterface() {
       let assistantReply = data.reply.trim()
       const extracted = extractRegistrationDataFromContent(assistantReply)
       if (extracted) {
-        setPendingRegistration(extracted)
+        setPendingRegistration({
+          ...extracted,
+          causeOfInfertility: '',
+          additionalInfo: '',
+        })
         setAwaitingPhone(true)
+        setAwaitingCause(false)
+        setAwaitingAdditional(false)
         setRegistrationFeedback(null)
         assistantReply =
           'I extracted the details from your document. Please review them below and share the patient phone number so I can continue.'
@@ -317,6 +513,13 @@ export function ChatInterface() {
     [messages],
   )
 
+  const followUpPrompt =
+    waitingForFinalDetails && awaitingCause
+      ? 'Before I finalize things, could you tell me the cause of infertility or reason you need treatment?'
+      : waitingForFinalDetails && awaitingAdditional
+        ? 'Thanks! Any additional information you would like to share before I notify the team?'
+        : null
+
   return (
     <div className="flex h-[calc(100%-96px)] flex-col justify-between bg-white">
       <div className="flex-1 overflow-y-auto space-y-4 bg-slate-50 p-4">
@@ -327,18 +530,18 @@ export function ChatInterface() {
           </div>
         )}
         {pendingRegistration && (
-          <RegistrationReviewCard
-            data={pendingRegistration}
-            awaitingPhone={awaitingPhone}
-            isSubmitting={isTriggeringRegistration}
-            feedback={registrationFeedback}
-            onConfirm={() => {
-              if (pendingRegistration) {
-                void submitRegistrationToRpa(pendingRegistration)
-              }
-            }}
-            onSave={handleRegistrationSave}
-          />
+          <>
+            <RegistrationReviewCard
+              data={pendingRegistration}
+              awaitingPhone={awaitingPhone}
+              isCollectingFinalDetails={waitingForFinalDetails}
+              isSubmitting={isTriggeringRegistration}
+              feedback={registrationFeedback}
+              onConfirm={handleConfirmationRequest}
+              onSave={handleRegistrationSave}
+            />
+            {followUpPrompt && <FollowUpPrompt prompt={followUpPrompt} />}
+          </>
         )}
         <div ref={messagesEndRef} />
       </div>
@@ -472,6 +675,7 @@ function renderFormattedContent(content: string) {
 type RegistrationReviewCardProps = {
   data: RegistrationData
   awaitingPhone: boolean
+  isCollectingFinalDetails: boolean
   isSubmitting: boolean
   feedback: string | null
   onConfirm: () => void
@@ -481,6 +685,7 @@ type RegistrationReviewCardProps = {
 function RegistrationReviewCard({
   data,
   awaitingPhone,
+  isCollectingFinalDetails,
   isSubmitting,
   feedback,
   onConfirm,
@@ -532,7 +737,13 @@ function RegistrationReviewCard({
     setIsEditing(false)
   }
 
-  const confirmDisabled = awaitingPhone || !data.phone || isSubmitting
+  const missingPhone = !data.phone
+
+  const confirmDisabled =
+    awaitingPhone ||
+    isCollectingFinalDetails ||
+    missingPhone ||
+    isSubmitting
 
   return (
     <div className="rounded-2xl bg-white p-4 text-sm shadow-sm ring-1 ring-blue-100">
@@ -567,9 +778,33 @@ function RegistrationReviewCard({
         </div>
       )}
 
-      {awaitingPhone && !isEditing && (
+      {(data.causeOfInfertility || data.additionalInfo) && (
+        <div className="mt-3 space-y-2">
+          {data.causeOfInfertility && (
+            <div className="rounded-xl bg-emerald-50/70 px-3 py-2">
+              <p className="text-[10px] uppercase tracking-wide text-emerald-600">
+                Cause of Infertility / Reason for Treatment
+              </p>
+              <p className="text-sm text-emerald-900">{data.causeOfInfertility}</p>
+            </div>
+          )}
+          {data.additionalInfo && (
+            <div className="rounded-xl bg-amber-50/70 px-3 py-2">
+              <p className="text-[10px] uppercase tracking-wide text-amber-600">Additional Information</p>
+              <p className="text-sm text-amber-900">{data.additionalInfo}</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {missingPhone && !isEditing && (
         <p className="mt-3 text-xs text-amber-600">
           Please share the patient&apos;s phone number so I can finish the registration.
+        </p>
+      )}
+      {isCollectingFinalDetails && !isEditing && (
+        <p className="mt-2 text-xs text-blue-600">
+          I&apos;m just capturing the final details from our chat before I notify the team.
         </p>
       )}
 
@@ -640,6 +875,15 @@ function RegistrationReviewCard({
 
 const REQUIRED_REGISTRATION_KEYS = ['firstName', 'lastName', 'dateOfBirth', 'gender', 'country'] as const
 
+function FollowUpPrompt({ prompt }: { prompt: string }) {
+  return (
+    <div className="rounded-2xl border border-dashed border-blue-200 bg-blue-50/60 px-4 py-3 text-sm text-blue-900">
+      <p className="font-semibold">One more thing…</p>
+      <p>{prompt}</p>
+    </div>
+  )
+}
+
 function extractRegistrationDataFromContent(content: string): RegistrationData | null {
   const candidates: string[] = []
   const sanitized = stripCodeFence(content)
@@ -669,6 +913,8 @@ function extractRegistrationDataFromContent(content: string): RegistrationData |
         gender: toStringValue(parsed.gender),
         country: toStringValue(parsed.country),
         phone: undefined,
+        causeOfInfertility: '',
+        additionalInfo: '',
       }
     } catch {
       continue

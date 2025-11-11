@@ -1,4 +1,4 @@
-const DEFAULT_RPA_BASE_URL = 'http://43.205.239.45:5000';
+const DEFAULT_RPA_BASE_URL = 'https://rpa-backend-lb-2147099693.ap-south-1.elb.amazonaws.com';
 
 const RPA_BASE_URL = DEFAULT_RPA_BASE_URL;
 

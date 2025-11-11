@@ -1,4 +1,4 @@
-const DEFAULT_RPA_BASE_URL = 'https://rpa-backend-lb-2147099693.ap-south-1.elb.amazonaws.com';
+const DEFAULT_RPA_BASE_URL = 'https://prd-pristine.api.novocuris.org';
 
 const RPA_BASE_URL = DEFAULT_RPA_BASE_URL;
 

@@ -3,7 +3,7 @@ import { Paperclip, Send, Trash2, Mic } from "lucide-react"
 import { TypingIndicator } from "./TypingIndicator"
 
 const CHAT_ENDPOINT =
-  ("http://localhost:5000/chat")
+  ("https://prd-pristine.api.novocuris.org/chat")
 
 type ChatMessage = {
   id: string

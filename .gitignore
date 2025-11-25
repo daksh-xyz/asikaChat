@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+server/.venv
+server/lib
+server/chroma_db
+server/data
+server/wheels
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

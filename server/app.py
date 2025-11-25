@@ -1,9 +1,10 @@
 import os
 import json
 from typing import List, Dict, Any, Optional
+import io
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 
 from langchain_groq import ChatGroq
@@ -13,9 +14,11 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_core.prompts import ChatPromptTemplate
 
-# NEW: Groq vision client + RPA
+# Document processing libraries
 import httpx
 from groq import Groq
+import PyPDF2
+import docx
 
 # -----------------------------
 # Env & config
@@ -31,10 +34,10 @@ CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_db")
 DATA_DIR = os.getenv("DATA_DIR", "./data")
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
-# NEW: optional RPA endpoint
-RPA_ENDPOINT = "https://prd-pristine.api.novocuris.org/api/workflows/patient-registration"
+# RPA endpoint for patient registration
+RPA_ENDPOINT = os.getenv("RPA_ENDPOINT", "https://prd-pristine.api.novocuris.org/api/workflows/patient-registration")
 
-# NEW: raw Groq client for vision / JSON-mode / OCR
+# Raw Groq client for document processing
 groq_client_raw = Groq(api_key=GROQ_API_KEY)
 
 # -----------------------------
@@ -54,7 +57,6 @@ app.add_middleware(
 # LLM & vector store
 # -----------------------------
 def initialize_llm() -> ChatGroq:
-    # IMPORTANT: use groq_api_key + model, not api_key/model_name
     return ChatGroq(
         temperature=0.1,
         groq_api_key=GROQ_API_KEY,
@@ -65,7 +67,6 @@ def initialize_llm() -> ChatGroq:
 def load_or_create_vector_db() -> Chroma:
     embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
 
-    # build from TXT if DB dir missing or empty
     if not os.path.exists(CHROMA_DB_PATH) or not os.listdir(CHROMA_DB_PATH):
         print("No Chroma DB found — building from TXT files in", DATA_DIR)
         loader = DirectoryLoader(
@@ -104,32 +105,81 @@ llm = initialize_llm()
 vector_db = load_or_create_vector_db()
 
 # -----------------------------
-# Debug endpoints
+# Document Processing Helpers
 # -----------------------------
-@app.get("/debug/chroma")
-async def debug_chroma():
-    data = vector_db.get(include=["metadatas", "documents"])
-    docs = []
-
-    for meta, doc in zip(data["metadatas"], data["documents"]):
-        docs.append({
-            "metadata": meta,
-            "content": doc
-        })
-
-    return {
-        "count": len(docs),
-        "documents": docs
-    }
+def extract_text_from_pdf(file_bytes: bytes) -> str:
+    """Extract text from PDF file bytes."""
+    try:
+        pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text() + "\n"
+        return text.strip()
+    except Exception as e:
+        raise ValueError(f"Failed to extract text from PDF: {e}")
 
 
-def debug_retrieval(query: str):
-    print("\n--- DEBUG: RETRIEVAL FOR:", query)
-    docs = vector_db.as_retriever().invoke(query)
-    for i, d in enumerate(docs):
-        print(f"\n[Result {i}]")
-        print("Source:", d.metadata)
-        print("Preview:", d.page_content[:500])
+def extract_text_from_docx(file_bytes: bytes) -> str:
+    """Extract text from DOCX file bytes."""
+    try:
+        doc = docx.Document(io.BytesIO(file_bytes))
+        text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+        return text.strip()
+    except Exception as e:
+        raise ValueError(f"Failed to extract text from DOCX: {e}")
+
+
+def process_referral_document(file_bytes: bytes, filename: str) -> str:
+    """Process uploaded document and extract text."""
+    filename_lower = filename.lower()
+    
+    if filename_lower.endswith('.pdf'):
+        return extract_text_from_pdf(file_bytes)
+    elif filename_lower.endswith('.docx'):
+        return extract_text_from_docx(file_bytes)
+    else:
+        raise ValueError(f"Unsupported file type: {filename}. Only PDF and DOCX are supported.")
+
+
+def extract_referral_data_with_llm(document_text: str) -> Dict[str, Any]:
+    """
+    Use Groq LLM to extract structured data from referral letter text.
+    """
+    completion = groq_client_raw.chat.completions.create(
+        model="meta-llama/llama-4-maverick-17b-128e-instruct",
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    "You are a medical document parser. Extract the following fields from this referral letter. "
+                    "Return ONLY a JSON object with these exact keys. If a field is not found, use null.\n\n"
+                    "Required fields:\n"
+                    "- nhsNumber (string)\n"
+                    "- hospitalLocation (string)\n"
+                    "- firstName (string)\n"
+                    "- lastName (string)\n"
+                    "- dateOfBirth (string, format YYYY-MM-DD if possible)\n"
+                    "- gender (string: Male/Female/Other, infer from context if needed)\n"
+                    "- phoneNumber (string)\n"
+                    "- gpName (string, doctor's full name)\n"
+                    "- gpAddress (string, GP clinic address)\n\n"
+                    "Referral letter text:\n\n"
+                    f"{document_text}\n\n"
+                    "Return only the JSON object, no explanation."
+                ),
+            }
+        ],
+        response_format={"type": "json_object"},
+        max_completion_tokens=1024,
+    )
+
+    content = completion.choices[0].message.content
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        data = {"raw": content}
+
+    return data
 
 
 # -----------------------------
@@ -142,15 +192,12 @@ def get_last_user_message(messages: List[Dict[str, Any]]) -> str:
             return str(msg.get("content") or "").strip()
     return ""
 
-def format_history_for_llm(messages: List[Dict[str, Any]], max_turns: int = 20) -> str:
-    """
-    Turn the chat history into a plain-text transcript for the model.
-    Keeps the last `max_turns` messages to avoid context blow-up.
-    """
-    # take only the last max_turns messages
-    msgs = messages[-max_turns:]
 
+def format_history_for_llm(messages: List[Dict[str, Any]], max_turns: int = 50) -> str:
+    """Turn the chat history into a plain-text transcript for the model."""
+    msgs = messages[-max_turns:]
     lines = []
+    
     for msg in msgs:
         role = msg.get("role", "user")
         content = (msg.get("content") or "").strip()
@@ -166,72 +213,10 @@ def format_history_for_llm(messages: List[Dict[str, Any]], max_turns: int = 20) 
     return "\n".join(lines)
 
 
-
-# NEW: OCR helper using Groq Llama 4 Maverick in JSON mode
-def run_id_ocr(image_data_url: str) -> Dict[str, Any]:
-    """
-    image_data_url is a full data URL, e.g. 'data:image/jpeg;base64,...'
-    We call Groq vision model in JSON mode to extract ID fields.
-    """
-    if not image_data_url:
-        raise ValueError("Empty image data URL")
-
-    completion = groq_client_raw.chat.completions.create(
-        model="meta-llama/llama-4-maverick-17b-128e-instruct",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            "You are an OCR engine for government ID documents. "
-                            "Read the image and extract the following fields as JSON ONLY, no explanation:\n"
-                            "- firstName (string)\n"
-                            "- lastName (string)\n"
-                            "- dob (date of birth in any format ISO or otherwise, or null if unclear)\n"
-                            "- gender (string)\n"
-                            "- country (string)\n\n"
-                            "Return a single JSON object with exactly these keys."
-                        ),
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": image_data_url,
-                        },
-                    },
-                ],
-            }
-        ],
-        # JSON-mode, supported on Maverick/Scout vision models
-        # See Groq Docs 'JSON Mode with Images'
-        response_format={"type": "json_object"},
-        max_completion_tokens=512,
-    )
-
-    content = completion.choices[0].message.content
-    try:
-        data = json.loads(content)
-    except json.JSONDecodeError:
-        # Fallback: wrap raw string if something went wrong
-        data = {"raw": content}
-
-    # Normalise keys a bit
-    return {
-        "firstName": data.get("firstName"),
-        "lastName": data.get("lastName"),
-        "dateOfBirth": data.get("dob"),
-        "gender": data.get("gender"),
-        "country": data.get("country"),
-    }
-
-
 def maybe_trigger_rpa(answer: str) -> Dict[str, Any]:
     """
-    Look for a line like:
-    Thank you... ~~~REGISTER_PATIENT_JSON: {...}~~~
-    Parse JSON, remap field names, and POST exactly what RPA expects.
+    Look for registration completion marker and trigger RPA.
+    Marker format: ~~~REGISTER_PATIENT_JSON: {...}~~~
     """
     marker = "~~~REGISTER_PATIENT_JSON:"
     meta: Dict[str, Any] = {}
@@ -241,10 +226,8 @@ def maybe_trigger_rpa(answer: str) -> Dict[str, Any]:
 
     for line in answer.splitlines():
         if marker in line:
-            # Take everything after the START marker
             json_part = line.split(marker, 1)[1].strip()
-
-            # Remove trailing closing tildes if present
+            
             if "~~~" in json_part:
                 json_part = json_part.split("~~~", 1)[0].strip()
 
@@ -255,25 +238,11 @@ def maybe_trigger_rpa(answer: str) -> Dict[str, Any]:
                 payload = json.loads(json_part)
             except json.JSONDecodeError as e:
                 meta["rpa_error"] = f"Could not parse REGISTER_PATIENT_JSON payload: {e}"
-                meta["raw_json_part"] = json_part  # optional: for debugging
+                meta["raw_json_part"] = json_part
                 return meta
 
-            # --- FIELD NAME REMAPPING ---
-            mapped = {
-                "firstName": payload.get("firstName"),
-                "lastName": payload.get("lastName"),
-                "gender": payload.get("gender"),
-                "phone": payload.get("phone"),
-                "country": payload.get("country"),
-                "causeOfInfertility": payload.get("causeOfInfertility"),
-                "additionalInfo": payload.get("additionalDetails") or payload.get("additionalInfo"),
-            }
-
-            # Handle both "dob" and "dateOfBirth" just in case
-            dob = payload.get("dob") or payload.get("dateOfBirth")
-            mapped["dateOfBirth"] = dob if dob else None
-
-            final_body = {"patientData": mapped}
+            # Map to RPA expected format
+            final_body = {"patientData": payload}
             meta["body"] = final_body
 
             if not RPA_ENDPOINT:
@@ -297,12 +266,63 @@ def maybe_trigger_rpa(answer: str) -> Dict[str, Any]:
     return meta
 
 
+
 # -----------------------------
-# /chat endpoint (RAG + OCR + registration + usage)
+# Debug endpoints
+# -----------------------------
+@app.get("/debug/chroma")
+async def debug_chroma():
+    data = vector_db.get(include=["metadatas", "documents"])
+    docs = []
+
+    for meta, doc in zip(data["metadatas"], data["documents"]):
+        docs.append({
+            "metadata": meta,
+            "content": doc
+        })
+
+    return {
+        "count": len(docs),
+        "documents": docs
+    }
+
+
+# -----------------------------
+# Document Upload Endpoint
+# -----------------------------
+@app.post("/upload-referral")
+async def upload_referral(file: UploadFile = File(...)):
+    """
+    Upload a referral letter (PDF or DOCX) and extract patient data.
+    Returns extracted data for the chat flow to continue.
+    """
+    try:
+        file_bytes = await file.read()
+        
+        # Extract text from document
+        document_text = process_referral_document(file_bytes, file.filename)
+        
+        # Use LLM to extract structured data
+        extracted_data = extract_referral_data_with_llm(document_text)
+        
+        return {
+            "success": True,
+            "extracted_data": extracted_data,
+            "document_text": document_text[:500] + "..." if len(document_text) > 500 else document_text
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+# -----------------------------
+# /chat endpoint (RAG + Registration)
 # -----------------------------
 @app.post("/chat")
 async def chat(request: Request):
-    # --- parse raw JSON body ---
     raw_bytes = await request.body()
     try:
         raw_text = raw_bytes.decode("utf-8", "replace")
@@ -311,109 +331,73 @@ async def chat(request: Request):
         return {"error": f"Invalid JSON body: {e}", "raw": raw_text}
 
     messages = payload.get("messages") or []
-    task = (payload.get("task") or "chat").lower()  # NEW: task routing
-    image_data_url: Optional[str] = payload.get("image")
 
     if not isinstance(messages, list):
         return {"error": "Field 'messages' must be an array"}
 
-    # -------------------------
-    # Task: OCR
-    # -------------------------
-    if task == "ocr":
-        if not image_data_url:
-            return {"error": "For task='ocr' you must send an 'image' field (data URL)."}
-
-        try:
-            ocr_data = run_id_ocr(image_data_url)
-        except Exception as e:
-            return {"error": f"OCR failed: {e}"}
-
-        # We deliberately do NOT call the chat LLM here.
-        # Frontend will turn ocr_data into an OCR_DATA: ... message for the chat flow.
-        return {"ocr_data": ocr_data}
-
-    # -------------------------
-    # Task: normal chat (RAG + registration flow)
-    # -------------------------
     user_text = get_last_user_message(messages)
     if not user_text:
         return {"reply": "I didn't receive any user message to respond to."}
 
     try:
-        # --- 1) Retrieve context from Chroma (RAG) ---
+        # Retrieve context from Chroma (RAG)
         retriever = vector_db.as_retriever()
         docs = retriever.invoke(user_text)
-
         context_text = "\n\n---\n\n".join(d.page_content for d in docs) or "No context available."
 
-        # --- 2) Build Radhika system prompt with registration + OCR_DATA ---
+        # System prompt for Radhika with new registration flow
         SYSTEM_PROMPT = (
             """
-            You are Radhika, a professional hospital assistant.
+            You are Radhika, a professional hospital assistant helping with patient registrations.
 
             General behaviour:
             - Warm, patient, empathetic; professional tone; <= 600 characters per message.
             - Ask ONE question at a time. Never reveal you are an AI.
-            - You can only talk about the hospital/clinic present in the source documents OR handle patient registration. YOU CANNOT BOOK APPOINTMENTS YET.
-            - Always respond in the language the user is using. If you do not understand the language, say so politely.
+            - Always respond in the language the user is using.
             - For any English text in the knowledge base, translate it into the user's language.
 
             RAG / knowledge behaviour:
             - Answer only from the information in the provided source documents ('Context').
-            - If the documents do not cover a question, say that you do not have that information instead of guessing.
-            - Then gently ask if there is anything else the user would like to know.
+            - If the documents do not cover a question, say that you do not have that information.
 
-            Registration flow (ID + infertility):
-            - A user may ask to register (in any language). If they do, switch into a registration flow and clearly guide them.
+            Registration flow (Referral Letter Based):
+            
+            When a user uploads a referral letter, the system will send you a special message starting with 
+            '~~~REFERRAL_DATA:' followed by JSON data extracted from the document, ending with ~~~.
+            
+            The JSON will contain:
+            {{
+                "hospitalLocation": "..."
+                "nhsNumber": "...",
+                "firstName": "...",
+                "lastName": "...",
+                "gender": "...",
+                "dateOfBirth": "DD-MM-YYYY",
+                "phoneNumber": "...",
+                "gpName": "...",
+                "gpAddress": "...",
+            }}
 
-            Step 0 - ID upload & OCR:
-            - Ask the user to upload a clear image of a government ID (passport, national ID, driver's licence).
-            - Do NOT attempt to read the ID yourself.
-            - The frontend will call a separate OCR model and then send you a special message that starts with '~~~OCR_DATA:' followed by JSON and ending with ~~~.
-            - When you receive a message starting with '~~~OCR_DATA:', treat the JSON that follows as the OCR output with fields:
-              {{ "firstName": ..., "middleName": ..., "lastName": ..., "dob": "YYYY/MM/DD", "gender": ..., "country": ... }}.
-            - Never assume a phone number from the document. You must always ask for the phone number separately.
+            Step 1 - Present extracted data:
+            - Show the user what was extracted from their referral letter.
+            - Ask them to confirm if the information is correct.
+            - If they say no, ask which fields need correction.
 
-            Step 1 - Present extracted ID details:
-            - Present the extracted details to the user in a friendly way, in their language.
-            - Show middle name ONLY if it is non-empty / not null.
-            - Do not invent or change values on your own.
+            Step 2 - Collect missing/additional information:
+            Ask ONE question at a time for:
+            - Hospital Number (if not in document, ask if they have one from previous correspondence, otherwise use "Pre-Registered")
+            - Ask if the patient is an inpatient or an outpatient (type)
+            - Ask if the patient prefers Self-Pay, Insured or NHS
+            - Ask the patient if they want to provide additional details
 
-            Step 2 - Confirm and correct:
-            - Ask the user if these details are correct (Yes/No).
-            - If they say No or ask for changes, ask specifically which fields to update.
-            - Verbally confirm the updated details and ask again if everything is correct.
+            Step 3 - Final confirmation and RPA trigger:
+            - When ALL required fields are collected, tell the patient that you are registering them.
+            - Ask for final confirmation.
+            - If confirmed, output on the LAST line:
 
-            Step 3 - Ask remaining questions:
-            - Ask for mobile phone number (do not infer).
-            - Ask for cause of infertility.
-            - Ask if they want to share any other/additional details.
+            ~~~REGISTER_PATIENT_JSON: {{"hospitalLocation": "...", "nhsNumber": "...", "firstName": "...", "lastName": "...", "gender": "...", "dateOfBirth": "DD-MM-YYYY", "phoneNumber": "...", "gpName": "...", "gpAddress": "...", "additionalInfo": "...", "type": "...", "paymentMode": "..." }}~~~
 
-            Step 4 - Final confirmation and RPA trigger marker:
-            - When you have all of these fields:
-              * firstName
-              * lastName
-              * dob
-              * gender
-              * phone
-              * country
-              * causeOfInfertility
-              * additionalInfo
-            - Summarise all details in natural language and ask for a last confirmation.
-            - If the user confirms, on the LAST line of your reply output this EXACT pattern:
-
-              ~~~REGISTER_PATIENT_JSON: {{"firstName": "...", "lastName": "...", "dateOfBirth": "YYYY/MM/DD", "gender": "...", "phone": "...", "country": "...", "causeOfInfertility": "...", "additionalInfo": "..."}}~~~
-
-            - Use valid JSON (double quotes, no trailing commas). If a field is missing, use null or an empty string.
-            - If the user later asks for a change, update the information, re-summarise, and output a NEW REGISTER_PATIENT_JSON line.
-
-            Important:
-            - Always ask only one question at a time.
-            - Maintain the user's language throughout the registration process.
-            - YOU CANNOT DO ANYTHING BESIDES ANSWERING FROM THE KNOWLEDGE BASE AND REGISTERING THE USER WITH THE CLINIC. 
-            - YOU CANNOT FORWARD REQUESTS TO OTHER DOCTORS. 
-            - YOU ARE A SIMPLE CHATBOT
+            Use valid JSON. If a field is not provided, ask again, if user doesn't provide say registration isn't possible without this information.
             """
             "Context:\n{context}"
         )
@@ -425,24 +409,20 @@ async def chat(request: Request):
                     "human",
                     "Here is the recent conversation between the user and you:\n\n"
                     "{history}\n\n"
-                    "Using the above conversation and the hospital 'Context', respond to the user's latest message. "
-                    "If they ask to modify a field (like DOB, name, phone, etc.), use the values you have already "
-                    "collected earlier in this same conversation."
+                    "Using the above conversation and the hospital 'Context', respond to the user's latest message."
                 ),
             ]
         )
 
         history_text = format_history_for_llm(messages)
-
         chain = prompt | llm
         ai_msg = chain.invoke({"context": context_text, "history": history_text})
-
 
         answer = (ai_msg.content or "")
         if not answer:
             answer = "I don't know the answer from the available documents."
 
-        # --- 3) Token usage & cost from response_metadata ---
+        # Token usage & cost tracking
         usage_meta = getattr(ai_msg, "response_metadata", {}) or {}
         token_usage = usage_meta.get("token_usage", {}) or {}
 
@@ -460,12 +440,11 @@ async def chat(request: Request):
             prompt_tokens + completion_tokens
         )
 
-        # Pricing for openai/gpt-oss-120b on Groq (example; update if needed):
         input_cost = (prompt_tokens / 1_000_000) * 0.15
         output_cost = (completion_tokens / 1_000_000) * 0.75
         estimated_cost_usd = input_cost + output_cost
 
-        # --- 4) Optionally trigger RPA if the marker is present ---
+        # Trigger RPA if registration is complete
         rpa_meta = maybe_trigger_rpa(answer)
 
         return {
@@ -483,7 +462,7 @@ async def chat(request: Request):
                 }
                 for d in docs
             ],
-            "rpa": rpa_meta,  # Includes payload/status if registration completed
+            "rpa": rpa_meta,
         }
 
     except Exception as e:
@@ -497,4 +476,4 @@ async def health():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("app:app", host="0.0.0.0", port=5000, reload=True)

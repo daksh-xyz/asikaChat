@@ -6,7 +6,7 @@ export function App() {
     <div className="container mx-auto px-4 py-16">
       <div className="max-w-4xl mx-auto text-center">
         <h1 className="text-4xl font-bold text-gray-900 mb-4">
-          Fertility Plus
+          Ramsay Health Care
         </h1>
         <p className="text-xl text-gray-600 mb-8">
           Your trusted healthcare partner. Click the chat icon to get started

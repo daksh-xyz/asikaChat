@@ -345,7 +345,7 @@ export function ChatInterface() {
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className="rounded-lg p-2 bg-[rgb(206,40,95)] hover:bg-[rgb(186,35,85)] transition-colors"
+              className="rounded-lg p-2 bg-[rgb(25,45,75)] hover:bg-[rgb(186,35,85)] transition-colors"
               title="Attach image, PDF, or DOCX file"
             >
               <Paperclip className="h-5 w-5 text-white" />
@@ -365,7 +365,7 @@ export function ChatInterface() {
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
               placeholder="Type your message or upload a referral letter..."
-              className="flex-1 rounded-lg border px-4 py-2 text-sm focus:ring-2 focus:ring-[rgb(206,40,95)] focus:outline-none"
+              className="flex-1 rounded-lg border px-4 py-2 text-sm focus:ring-2 focus:ring-[rgb(25,45,75)] focus:outline-none"
             />
           ) : (
             <div className="flex-1 flex items-center justify-between rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 shadow-sm">
@@ -390,7 +390,7 @@ export function ChatInterface() {
           <button
             type="submit"
             disabled={(!inputValue.trim() && !attachment) || isLoading}
-            className="rounded-lg bg-[rgb(206,40,95)] p-2 hover:bg-[rgb(186,35,85)] disabled:opacity-60 disabled:hover:bg-[rgb(206,40,95)] transition-colors"
+            className="rounded-lg bg-[rgb(25,45,75)] p-2 hover:bg-[rgb(186,35,85)] disabled:opacity-60 disabled:hover:bg-[rgb(25,45,75)] transition-colors"
           >
             <Send className="h-5 w-5 text-white" />
           </button>

@@ -345,10 +345,10 @@ async def chat(request: Request):
         docs = retriever.invoke(user_text)
         context_text = "\n\n---\n\n".join(d.page_content for d in docs) or "No context available."
 
-        # System prompt for Radhika with new registration flow
+        # System prompt for Rachel with new registration flow
         SYSTEM_PROMPT = (
             """
-            You are Radhika, a professional hospital assistant helping with patient registrations.
+            You are Rachel, a professional hospital assistant helping with patient registrations.
 
             General behaviour:
             - Warm, patient, empathetic; professional tone; <= 600 characters per message.

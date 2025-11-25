@@ -17,7 +17,7 @@ export function ChatWidget() {
         <div className="flex items-center gap-3">
           <img src="/Ramsay.png" alt="Asika" className="w-10 h-10 rounded-full border-2 border-white/30" />
           <div>
-            <h3 className="font-semibold text-lg">Fertility Plus</h3>
+            <h3 className="font-semibold text-lg">Ramsay Health Care</h3>
             <div className="flex items-center gap-1 text-xs text-blue-50">
               <span className="w-2 h-2 bg-emerald-300 rounded-full" />
               <span>Online</span>

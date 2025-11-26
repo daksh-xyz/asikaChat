@@ -31,7 +31,7 @@ function getGreetingMessage() {
 I'm Rachel, your personal hospital assistant.
 I'm here to answer any questions you have about our clinic, or help you complete your patient registration.
 You can upload a referral letter (PDF or DOCX) to get started with registration.
-You can speak to me in any language: English, हिंदी, اَلْعَرَبِيَّةُ and more!`
+You can speak to me in any language: English, اَلْعَرَبِيَّةُ and more!`
 }
 
 export function ChatInterface() {

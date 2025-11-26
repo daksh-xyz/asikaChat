@@ -272,7 +272,7 @@ export function ChatInterface() {
     const isUser = role === 'user'
     return (
       <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
-        <div className={`max-w-[75%] whitespace-pre-line break-words rounded-2xl px-4 py-3 text-sm shadow-sm ${isUser ? 'bg-gradient-to-r from-rose-500 to-red-500 text-white' : 'bg-white text-slate-800 ring-1 ring-slate-200'}`} >
+        <div className={`max-w-[75%] whitespace-pre-line break-words rounded-2xl px-4 py-3 text-sm shadow-sm ${isUser ? 'bg-gradient-to-r from-slate-900 to-slate-700 text-white' : 'bg-white text-slate-800 ring-1 ring-slate-200'}`} >
           {
             renderFormattedContent(content)
           }
